@@ -56,6 +56,7 @@ def setup(args):
         yield conns
 
     finally:
+        dprint("Cleaning Up")
         for conn in conns:
             clean_servers(conn)
             clean_volumes(conn)
@@ -63,6 +64,7 @@ def setup(args):
 
         for pname in project_names:
             delete_project(admin_conn, pname)
+        dprint("Done!")
 
 
 def clean_volumes(conn):
@@ -126,7 +128,7 @@ def delete_project(conn, name):
 
 
 def create_volume(conn, size, vol_ref=None, vols=None, image_ref=None):
-    print("Creating Volume: size={}, vol_ref={}, image_ref={}".format(
+    vprint("Creating Volume: size={}, vol_ref={}, image_ref={}".format(
         size, vol_ref, image_ref))
     vol_id = conn.block_store.create_volume(size=size,
                                             imageRef=image_ref,
@@ -142,7 +144,7 @@ def create_volume(conn, size, vol_ref=None, vols=None, image_ref=None):
 
 
 def create_server(conn, root_vol, data_vol, flavor, net_id, security_group):
-    print("Creating Server: root_vol={}, data_vol={}, net_id={}".format(
+    vprint("Creating Server: root_vol={}, data_vol={}, net_id={}".format(
         root_vol.id, data_vol.id, net_id))
     name = "myvm-{}".format(str(uuid.uuid4()))
     server_id = conn.compute.create_server(
@@ -171,7 +173,7 @@ def create_server(conn, root_vol, data_vol, flavor, net_id, security_group):
 
 
 def create_security_group(conn, name):
-    print("Creating security_group {}".format(name))
+    vprint("Creating security_group {}".format(name))
     sec_group = conn.network.create_security_group(name=name)
     for direction in ['ingress', 'egress']:
         # ICMP
@@ -206,10 +208,11 @@ def exec_cmd(server, cmd, quiet=False):
         ncmd = (
             "sshpass -p 'cubswin:)' "
             "ssh "
+            "{} "
             "-o UserKnownHostsFile=/dev/null "
             "-o StrictHostKeyChecking=no "
             "-o CheckHostIP=no "
-            "cirros@{} \"{}\"".format(ip, cmd))
+            "cirros@{} \"{}\"".format("-q" if quiet else "", ip, cmd))
         if not quiet:
             print(ncmd)
         result = subprocess.check_output(shlex.split(ncmd))
@@ -221,12 +224,13 @@ def exec_cmd(server, cmd, quiet=False):
     return result
 
 
-def dprint(s):
+def dprint(s, c="="):
     l = len(s)
     bfl = l + 4
-    print("=" * bfl)
-    print("= {} =".format(s))
-    print("=" * bfl)
+    print()
+    print(c * bfl)
+    print("{c} {s} {c}".format(c=c, s=s))
+    print(c * bfl)
     print()
 
 
@@ -240,16 +244,16 @@ def main(args):
         for conn in conns:
             dprint("Setting Up Project")
 
-            dprint("Creating Root Image")
+            dprint("Creating Root Image", c="*")
             # Create initial volume:
             vol = create_volume(conn, args.root_size, image_ref=args.image_id)
 
             root_vols = queue.Queue()
             data_vols = queue.Queue()
-            dprint("Creating Security Group")
+            dprint("Creating Security Group", c="*")
             sec_group = "open"
             create_security_group(conn, sec_group)
-            dprint("Creating Data and Root Volumes")
+            dprint("Creating Data and Root Volumes", c="*")
             for vm in range(args.num_vms):
                 threading.Thread(target=create_volume,
                                  args=(conn, args.root_size),
@@ -259,7 +263,7 @@ def main(args):
                                  args=(conn, args.data_size),
                                  kwargs={'vols': data_vols}).start()
 
-            dprint("Creating Servers")
+            dprint("Creating Servers", c="*")
             for vm in range(args.num_vms):
                 root_vol = root_vols.get()
                 data_vol = data_vols.get()
@@ -325,7 +329,7 @@ def main(args):
                 while not stop:
                     exec_cmd(serverd,
                              "sudo dd if=/dev/zero of=/mnt/mydrive/test.img "
-                             "bs=1M count=500 >/dev/null 2>&1", quiet=True)
+                             "bs=1M count=500", quiet=True)
                 print("Traffic thread stopped")
 
             threading.Thread(target=_traffic_helper).start()
@@ -380,7 +384,7 @@ if __name__ == "__main__":
                         help='Clean volumes and servers before running')
     parser.add_argument('-p', '--projects', default="silver,gold",
                         help="Comma delimited list of project names to use")
-    parser.add_argument('-v', '--verbose', default=False,
+    parser.add_argument('-v', '--verbose', default=False, action='store_true',
                         help="Enable verbose output")
 
     args = parser.parse_args()
