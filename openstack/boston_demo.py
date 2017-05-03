@@ -6,6 +6,7 @@ from __future__ import (print_function, unicode_literals, division,
 import argparse
 import contextlib
 import os
+import re
 import random
 import shlex
 import subprocess
@@ -16,11 +17,19 @@ import uuid
 
 from openstack import connection
 
+from dfs_sdk import DateraApi21
+
 import six.moves.queue as queue
 from six.moves import input
 
+SIP = re.compile(r'san_ip\s+?=\s+?(?P<san_ip>(\d{1,3}\.){3}\d{1,3})')
+SLG = re.compile(r'san_login\s+?=\s+?(?P<san_login>.*)')
+SPW = re.compile(r'san_password\s+?=\s+?(?P<san_password>.*)')
+
 stop = False
 verbose = False
+net_name = None
+image_id = None
 
 
 class QuitError(Exception):
@@ -42,8 +51,12 @@ def vprint(*args, **kwargs):
 def setup(args):
     admin_conn, conns = None, []
     project_names = [elem for elem in args.projects.split(",") if elem]
+    base_bandwidth = 500
+    index = 1
     try:
         admin_conn = get_conn()
+        global image_id
+        image_id = admin_conn.image.find_image(args.image_name).id
         if args.clean:
             for conn, pname in zip(conns, project_names):
                 delete_project(admin_conn, pname)
@@ -51,9 +64,14 @@ def setup(args):
 
         for pname in project_names:
             create_project(admin_conn, pname)
+            create_volume_type(admin_conn,
+                               pname,
+                               volume_backend_name="datera",
+                               total_bandwidth_max=str(base_bandwidth * index))
+            index += 1
             conns.append(get_conn(project_name=pname))
 
-        yield conns
+        yield zip(conns, project_names)
 
     finally:
         dprint("Cleaning Up")
@@ -63,6 +81,7 @@ def setup(args):
         time.sleep(5)
 
         for pname in project_names:
+            delete_volume_type(admin_conn, pname)
             delete_project(admin_conn, pname)
         dprint("Done!")
 
@@ -82,18 +101,28 @@ def clean_servers(conn):
         time.sleep(2)
 
 
-def get_conn(project_name=None, username=None, password=None):
+def get_conn(project_name=None, username=None, password=None, udomain=None,
+             pdomain=None):
     auth_dict = {'auth_url': os.getenv("OS_AUTH_URL"),
                  'project_name': project_name if project_name else os.getenv(
                      "OS_PROJECT_NAME"),
                  'username': username if username else os.getenv(
                      "OS_USERNAME"),
                  'password': password if password else os.getenv(
-                     "OS_PASSWORD")}
+                     "OS_PASSWORD"),
+                 'user_domain_name': udomain if udomain else os.getenv(
+                     "OS_USER_DOMAIN_NAME"),
+                 'project_domain_name': pdomain if pdomain else os.getenv(
+                     "OS_PROJECT_DOMAIN_NAME")}
+
+    if not all(auth_dict.keys()):
+        usage()
+        sys.exit(1)
     return connection.Connection(**auth_dict)
 
 
 def create_project(conn, name):
+    vprint("Creating project: {}".format(name))
     conn.identity.create_project(name=name)
     role = conn.identity.create_role(name=name)
     conn.identity.update_role(role)
@@ -107,6 +136,7 @@ def create_project(conn, name):
 
 
 def delete_project(conn, name):
+    vprint("Deleting project: {}".format(name))
     pid = conn.identity.find_project(name)
     if pid:
         conn.identity.delete_project(pid, ignore_missing=False)
@@ -127,12 +157,18 @@ def delete_project(conn, name):
         conn.identity.delete_role(role, ignore_missing=False)
 
 
-def create_volume(conn, size, vol_ref=None, vols=None, image_ref=None):
-    vprint("Creating Volume: size={}, vol_ref={}, image_ref={}".format(
-        size, vol_ref, image_ref))
+def create_volume(conn, size, vol_ref=None, vols=None, image_name=None,
+                  volume_type=None):
+    global image_id
+    imid = None
+    if not vol_ref:
+        imid = image_id
+    vprint("Creating Volume: size={}, vol_ref={}, image_name={}, "
+           "volume_type={}".format(size, vol_ref, image_name, volume_type))
     vol_id = conn.block_store.create_volume(size=size,
-                                            imageRef=image_ref,
-                                            source_volid=vol_ref).id
+                                            imageRef=imid,
+                                            source_volid=vol_ref,
+                                            volume_type=None).id
     vprint("Created Volume: {}".format(vol_id))
     while True:
         vol = conn.block_store.get_volume(vol_id)
@@ -143,12 +179,28 @@ def create_volume(conn, size, vol_ref=None, vols=None, image_ref=None):
             return vol
 
 
-def create_server(conn, root_vol, data_vol, flavor, net_id, security_group):
-    vprint("Creating Server: root_vol={}, data_vol={}, net_id={}".format(
-        root_vol.id, data_vol.id, net_id))
+def create_volume_type(conn, name, **attrs):
+    vprint("Creating volume type: {}, extra_specs: {}".format(name, attrs))
+    conn.block_store.create_type(name=name, extra_specs=attrs)
+
+
+def delete_volume_type(conn, name):
+    vprint("Deleting volume type: {}".format(name))
+    fil = [t for t in conn.block_store.types() if t.name == name]
+    tp = None
+    if len(fil) > 0:
+        tp = fil[0]
+    if tp:
+        conn.block_store.delete_type(tp, ignore_missing=False)
+
+
+def create_server(conn, root_vol, data_vol, flavor, net_name, security_group):
+    vprint("Creating Server: root_vol={}, data_vol={}, net={}".format(
+        root_vol.id, data_vol.id, net_name))
     name = "myvm-{}".format(str(uuid.uuid4()))
+    net = conn.network.find_network(net_name)
     server_id = conn.compute.create_server(
-            name=name, flavorRef=flavor, networks=[{'uuid': net_id}],
+            name=name, flavorRef=flavor, networks=[{'uuid': net.id}],
             block_device_mapping_v2=[{
                 "device_name": "vda",
                 "source_type": "volume",
@@ -201,9 +253,9 @@ def delete_security_group(conn, name):
 
 
 def exec_cmd(server, cmd, quiet=False):
-    if not quiet:
-        print("Server: {}, cmd: {}".format(server.name, cmd))
-    ip = server.addresses['public'][1]['addr']
+    vprint("Server: {}, cmd: {}".format(server.name, cmd))
+    global net_name
+    ip = server.addresses[net_name][0]['addr']
     try:
         ncmd = (
             "sshpass -p 'cubswin:)' "
@@ -213,12 +265,10 @@ def exec_cmd(server, cmd, quiet=False):
             "-o StrictHostKeyChecking=no "
             "-o CheckHostIP=no "
             "cirros@{} \"{}\"".format("-q" if quiet else "", ip, cmd))
-        if not quiet:
-            print(ncmd)
+        vprint(ncmd)
         result = subprocess.check_output(shlex.split(ncmd))
     except subprocess.CalledProcessError as e:
-        if not quiet:
-            print(e)
+        vprint(e)
         result = e.output
 
     return result
@@ -234,19 +284,43 @@ def dprint(s, c="="):
     print()
 
 
+def readCinderConf():
+    data = None
+    with open('/etc/cinder/cinder.conf') as f:
+        data = f.read()
+    san_ip = SIP.search(data).group('san_ip')
+    san_login = SLG.search(data).group('san_login')
+    san_password = SPW.search(data).group('san_password')
+    return san_ip, san_login, san_password
+
+
+def getAPI(tenant=None):
+    san_ip, san_login, san_password = readCinderConf()
+    if tenant and "root" not in tenant:
+        tenant = "/root/{}".format(tenant)
+    return DateraApi21(san_ip,
+                       username=san_login,
+                       password=san_password,
+                       tenant=tenant,
+                       secure=True,
+                       immediate_login=True)
+
+
 def main(args):
+
     global verbose
     if args.verbose:
         verbose = True
 
     dprint("Starting OpenStack Boston Summit Tenancy Demo")
     with setup(args) as conns:
-        for conn in conns:
+        for conn, pname in conns:
             dprint("Setting Up Project")
 
             dprint("Creating Root Image", c="*")
             # Create initial volume:
-            vol = create_volume(conn, args.root_size, image_ref=args.image_id)
+            vol = create_volume(conn, args.root_size,
+                                image_name=args.image_name)
 
             root_vols = queue.Queue()
             data_vols = queue.Queue()
@@ -255,66 +329,77 @@ def main(args):
             create_security_group(conn, sec_group)
             dprint("Creating Data and Root Volumes", c="*")
             for vm in range(args.num_vms):
-                threading.Thread(target=create_volume,
-                                 args=(conn, args.root_size),
-                                 kwargs={'vols': root_vols,
-                                         'vol_ref': vol.id}).start()
-                threading.Thread(target=create_volume,
-                                 args=(conn, args.data_size),
-                                 kwargs={'vols': data_vols}).start()
+                thread = threading.Thread(target=create_volume,
+                                          args=(conn, args.root_size),
+                                          kwargs={'vols': root_vols,
+                                                  'vol_ref': vol.id,
+                                                  'volume_type': "datera"})
+                thread.daemon = True
+                thread.start()
+                thread = threading.Thread(target=create_volume,
+                                          args=(conn, args.data_size),
+                                          kwargs={'vols': data_vols,
+                                                  'volume_type': pname})
+                thread.daemon = True
+                thread.start()
 
             dprint("Creating Servers", c="*")
             for vm in range(args.num_vms):
                 root_vol = root_vols.get()
                 data_vol = data_vols.get()
-                threading.Thread(target=create_server,
-                                 args=(conn, root_vol, data_vol,
-                                       args.flavor_id, args.net_id,
-                                       sec_group)).start()
+                thread = threading.Thread(target=create_server,
+                                          args=(conn, root_vol, data_vol,
+                                                args.flavor_id, args.net_name,
+                                                sec_group))
+
+                thread.daemon = True
+                thread.start()
 
         time.sleep(10)
         dprint("Testing Connection To Servers")
-        for conn in conns:
+        for conn, name in conns:
+            servers = conn.compute.servers()
+            if not servers:
+                raise EnvironmentError(
+                    "No servers available in {} project. Problem in "
+                    "setup".format(name))
             for server in conn.compute.servers():
                 while True:
-                    result = exec_cmd(server, "uname -a && ip a")
+                    result = exec_cmd(server, "uname -a && ip a",
+                                      quiet=verbose)
                     if "returned non-zero exit status" not in result:
                         break
 
-        def quit():
+        def quit(arg_str):
             print("Recieved Quit Request")
             raise QuitError
 
-        def print_projects():
-            print("Projects")
-            print("========")
-            for project in conns[0].identity.projects():
+        def print_projects(arg_str):
+            dprint("Projects", c="-")
+            for project in conns[0][0].identity.projects():
                 print(project.name, ":", project.id)
 
-        def print_volumes():
-            print("Project : Volume")
-            print("================")
-            for conn in conns:
+        def print_volumes(arg_str):
+            dprint("Project : Volume", c="-")
+            for conn, _ in conns:
                 for volumed in conn.block_store.volumes():
                     pid = volumed.project_id
                     project = conn.identity.find_project(pid)
                     print(project.name, ":", volumed.id)
 
-        def print_servers():
-            print("Project : Server")
-            print("================")
-            for conn in conns:
+        def print_servers(arg_str):
+            dprint("Project : Server", c="-")
+            for conn, _ in conns:
                 for serverd in conn.compute.servers():
                     pid = serverd.project_id
                     project = conn.identity.find_project(pid)
                     print(project.name, ":", serverd.id)
 
-        def run_traffic():
-            serverd = next(random.choice(conns).compute.servers())
+        def run_traffic(arg_str):
+            serverd = next(random.choice(conns)[0].compute.servers())
             pid = serverd.project_id
             volume = serverd.attached_volumes[0]
-            print("Running Traffic")
-            print("===============")
+            dprint("Running Traffic", c="-")
             print("Project :", pid)
             print("Server :", serverd.id)
             print("Volume :", volume['id'])
@@ -329,16 +414,38 @@ def main(args):
                 while not stop:
                     exec_cmd(serverd,
                              "sudo dd if=/dev/zero of=/mnt/mydrive/test.img "
-                             "bs=1M count=500", quiet=True)
-                print("Traffic thread stopped")
+                             "bs=1M count=500", quiet=verbose)
+                dprint("Traffic thread stopped", c="-")
 
             threading.Thread(target=_traffic_helper).start()
-            print("Traffic is running")
+            dprint("Traffic is running", c="-")
 
-        def stop_traffic():
-            print("Stopping Traffic")
+        def stop_traffic(arg_str):
+            dprint("Stopping Traffic")
             global stop
             stop = True
+
+        def show_ai(arg_str):
+            tenant = arg_str.strip()
+            if not tenant:
+                tenant = "/root"
+            dprint("AppInstances under Tenant: ", tenant)
+            api = getAPI(tenant)
+            for ai in api.app_instances.list():
+                print(ai)
+
+        def get_traffic_stats(arg_str):
+            tenant = arg_str.strip()
+            if not tenant:
+                tenant = "/root"
+            api = getAPI(tenant)
+            try:
+                while True:
+                    metric = api.metrics.io.iops_write.latest.get()[0]['point']
+                    print("IOPS: ", metric['value'])
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
 
         # Finished with setup
         run = {'q': quit,
@@ -346,23 +453,32 @@ def main(args):
                'pv': print_volumes,
                'ps': print_servers,
                'rt': run_traffic,
-               'st': stop_traffic}
+               'st': stop_traffic,
+               'sai': show_ai}
         help = """
+--------------------------------------------
 q --> Quit
 pp --> Print Projects
 pv --> Print Volumes
 ps --> Print Servers
 rt --> Run Traffic
 st --> Stop Traffic
------------
+sai tenant --> Show App Instances for Tenant
+gts tenant --> Show traffic stats for Tenant
+--------------------------------------------
 """
         dprint("Ready To Go!")
         while True:
             result = input(help)
 
             try:
+                cmd, arg_str = None, None
+                try:
+                    cmd, arg_str = result.split(maxsplit=1)
+                except ValueError:
+                    cmd, arg_str = result, ""
                 print()
-                run[result.lower()]()
+                run[cmd.lower()](arg_str)
                 print()
             except KeyError:
                 print("Unknown input: {}".format(result))
@@ -376,9 +492,9 @@ if __name__ == "__main__":
     parser.add_argument('num_vms', type=int)
     parser.add_argument('root_size', type=int)
     parser.add_argument('data_size', type=int)
-    parser.add_argument('image_id',
+    parser.add_argument('image_name',
                         help="ID for image to use in root volume")
-    parser.add_argument('net_id')
+    parser.add_argument('net_name')
     parser.add_argument('flavor_id')
     parser.add_argument('-c', '--clean', action='store_true',
                         help='Clean volumes and servers before running')
@@ -389,10 +505,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    global net_name
+    net_name = args.net_name
+
     requirements = ["sshpass"]
 
     for requirement in requirements:
-        print("Checking requirements")
+        dprint("Checking requirements")
         try:
             subprocess.check_call(shlex.split("which {}".format(requirement)))
         except subprocess.CalledProcessError:
