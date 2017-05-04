@@ -7,7 +7,6 @@ import argparse
 import contextlib
 import os
 import re
-import random
 import shlex
 import subprocess
 import sys
@@ -22,7 +21,10 @@ from dfs_sdk import DateraApi21
 import six.moves.queue as queue
 from six.moves import input
 
-SIP = re.compile(r'san_ip\s+?=\s+?(?P<san_ip>(\d{1,3}\.){3}\d{1,3})')
+IPRE_STR = r'(\d{1,3}\.){3}\d{1,3}'
+IPRE = re.compile(IPRE_STR)
+
+SIP = re.compile(r'san_ip\s+?=\s+?(?P<san_ip>%s)' % IPRE_STR)
 SLG = re.compile(r'san_login\s+?=\s+?(?P<san_login>.*)')
 SPW = re.compile(r'san_password\s+?=\s+?(?P<san_password>.*)')
 
@@ -53,6 +55,7 @@ def setup(args):
     project_names = [elem for elem in args.projects.split(",") if elem]
     base_bandwidth = 500
     index = 1
+    sec_group = "open"
     try:
         admin_conn = get_conn()
         global image_id
@@ -64,12 +67,15 @@ def setup(args):
 
         for pname in project_names:
             create_project(admin_conn, pname)
+            conn = get_conn(project_name=pname)
+            dprint("Creating Security Group", c="*")
+            create_security_group(conn, sec_group)
             create_volume_type(admin_conn,
                                pname,
                                volume_backend_name="datera",
                                total_bandwidth_max=str(base_bandwidth * index))
             index += 1
-            conns.append(get_conn(project_name=pname))
+            conns.append(conn)
 
         yield zip(conns, project_names)
 
@@ -83,6 +89,7 @@ def setup(args):
         for pname in project_names:
             delete_volume_type(admin_conn, pname)
             delete_project(admin_conn, pname)
+            delete_security_group(admin_conn, sec_group)
         dprint("Done!")
 
 
@@ -249,13 +256,22 @@ def create_security_group(conn, name):
 
 
 def delete_security_group(conn, name):
-    conn.network.remove_security_group(name, ignore_missing=False)
+    for sec_group in conn.network.security_groups():
+        if sec_group.name == name:
+            conn.network.delete_security_group(sec_group.id,
+                                               ignore_missing=False)
 
 
-def exec_cmd(server, cmd, quiet=False):
+def exec_cmd(server, cmd, quiet=False, reraise=False):
     vprint("Server: {}, cmd: {}".format(server.name, cmd))
     global net_name
-    ip = server.addresses[net_name][0]['addr']
+    try:
+        ip = server.addresses[net_name][0]['addr']
+        m = IPRE.match(ip)
+        if not m:
+            ip = server.addresses[net_name][1]['addr']
+    except KeyError:
+        ip = server.addresses[net_name][1]['addr']
     try:
         ncmd = (
             "sshpass -p 'cubswin:)' "
@@ -270,6 +286,8 @@ def exec_cmd(server, cmd, quiet=False):
     except subprocess.CalledProcessError as e:
         vprint(e)
         result = e.output
+        if reraise:
+            raise
 
     return result
 
@@ -308,9 +326,10 @@ def getAPI(tenant=None):
 
 def main(args):
 
-    global verbose
+    global verbose, net_name
     if args.verbose:
         verbose = True
+    net_name = args.net_name
 
     dprint("Starting OpenStack Boston Summit Tenancy Demo")
     with setup(args) as conns:
@@ -324,9 +343,6 @@ def main(args):
 
             root_vols = queue.Queue()
             data_vols = queue.Queue()
-            dprint("Creating Security Group", c="*")
-            sec_group = "open"
-            create_security_group(conn, sec_group)
             dprint("Creating Data and Root Volumes", c="*")
             for vm in range(args.num_vms):
                 thread = threading.Thread(target=create_volume,
@@ -350,7 +366,7 @@ def main(args):
                 thread = threading.Thread(target=create_server,
                                           args=(conn, root_vol, data_vol,
                                                 args.flavor_id, args.net_name,
-                                                sec_group))
+                                                'open'))
 
                 thread.daemon = True
                 thread.start()
@@ -364,20 +380,30 @@ def main(args):
                     "No servers available in {} project. Problem in "
                     "setup".format(name))
             for server in conn.compute.servers():
-                while True:
-                    result = exec_cmd(server, "uname -a && ip a",
-                                      quiet=verbose)
-                    if "returned non-zero exit status" not in result:
+                timeout = 30
+                while timeout:
+                    try:
+                        result = exec_cmd(server, "uname -a && ip a",
+                                          quiet=verbose)
                         break
+                    except subprocess.CalledProcessError:
+                        timeout -= 1
+                        time.sleep(1)
 
         def quit(arg_str):
             print("Recieved Quit Request")
             raise QuitError
 
         def print_projects(arg_str):
-            dprint("Projects", c="-")
+            projects = []
             for project in conns[0][0].identity.projects():
-                print(project.name, ":", project.id)
+                projects.append((project.name, str(uuid.UUID(project.id))))
+            api = getAPI(None)
+            dprint("Project Name --> Datera Tenant")
+            for tenant in api.tenants.list():
+                for pname, pid in projects:
+                    if pid in tenant.get("name"):
+                        print(pname, "-->", tenant)
 
         def print_volumes(arg_str):
             dprint("Project : Volume", c="-")
@@ -396,7 +422,7 @@ def main(args):
                     print(project.name, ":", serverd.id)
 
         def run_traffic(arg_str):
-            serverd = next(random.choice(conns)[0].compute.servers())
+            serverd = next(conns[0][0].compute.servers())
             pid = serverd.project_id
             volume = serverd.attached_volumes[0]
             dprint("Running Traffic", c="-")
@@ -413,15 +439,18 @@ def main(args):
                 stop = False
                 while not stop:
                     exec_cmd(serverd,
-                             "sudo dd if=/dev/zero of=/mnt/mydrive/test.img "
-                             "bs=1M count=500", quiet=verbose)
+                             "sudo dd if=/dev/urandom of=/mnt/mydrive/test.img"
+                             " bs=1M count=1000 >/dev/null 2>&1 && sudo sync"
+                             "", quiet=verbose)
                 dprint("Traffic thread stopped", c="-")
 
-            threading.Thread(target=_traffic_helper).start()
+            thread = threading.Thread(target=_traffic_helper)
+            thread.daemon = True
+            thread.start()
             dprint("Traffic is running", c="-")
 
         def stop_traffic(arg_str):
-            dprint("Stopping Traffic")
+            dprint("Stopping Traffic", c="-")
             global stop
             stop = True
 
@@ -429,20 +458,27 @@ def main(args):
             tenant = arg_str.strip()
             if not tenant:
                 tenant = "/root"
-            dprint("AppInstances under Tenant: ", tenant)
+            dprint("AppInstances under Tenant: {}".format(tenant), c="-")
             api = getAPI(tenant)
             for ai in api.app_instances.list():
-                print(ai)
+                print(ai.get('name'))
 
         def get_traffic_stats(arg_str):
+            dprint("Getting Traffic Stats", c="-")
             tenant = arg_str.strip()
             if not tenant:
                 tenant = "/root"
             api = getAPI(tenant)
             try:
                 while True:
-                    metric = api.metrics.io.iops_write.latest.get()[0]['point']
-                    print("IOPS: ", metric['value'])
+                    print("Metrics!")
+                    try:
+                        metric = api.metrics.io.thpt_write.latest.get(
+                            )[0]['point']
+                        print("IOPS: ", metric['value'])
+                    except IndexError:
+                        print("No traffic object available")
+                        break
                     time.sleep(1)
             except KeyboardInterrupt:
                 pass
@@ -454,7 +490,8 @@ def main(args):
                'ps': print_servers,
                'rt': run_traffic,
                'st': stop_traffic,
-               'sai': show_ai}
+               'sai': show_ai,
+               'gts': get_traffic_stats}
         help = """
 --------------------------------------------
 q --> Quit
@@ -474,7 +511,7 @@ gts tenant --> Show traffic stats for Tenant
             try:
                 cmd, arg_str = None, None
                 try:
-                    cmd, arg_str = result.split(maxsplit=1)
+                    cmd, arg_str = result.split(" ", 1)
                 except ValueError:
                     cmd, arg_str = result, ""
                 print()
@@ -492,8 +529,7 @@ if __name__ == "__main__":
     parser.add_argument('num_vms', type=int)
     parser.add_argument('root_size', type=int)
     parser.add_argument('data_size', type=int)
-    parser.add_argument('image_name',
-                        help="ID for image to use in root volume")
+    parser.add_argument('image_name')
     parser.add_argument('net_name')
     parser.add_argument('flavor_id')
     parser.add_argument('-c', '--clean', action='store_true',
@@ -504,9 +540,6 @@ if __name__ == "__main__":
                         help="Enable verbose output")
 
     args = parser.parse_args()
-
-    global net_name
-    net_name = args.net_name
 
     requirements = ["sshpass"]
 
