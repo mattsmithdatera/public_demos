@@ -28,6 +28,7 @@ SIP = re.compile(r'san_ip\s+?=\s+?(?P<san_ip>%s)' % IPRE_STR)
 SLG = re.compile(r'san_login\s+?=\s+?(?P<san_login>.*)')
 SPW = re.compile(r'san_password\s+?=\s+?(?P<san_password>.*)')
 
+# Shameful, but effective
 stop = False
 verbose = False
 net_name = None
@@ -81,6 +82,11 @@ def setup(args):
 
     finally:
         dprint("Cleaning Up")
+        # Quick and dirty cleanup of any traffic threads left over
+        try:
+            subprocess.check_call(shlex.split("killall sshpass"))
+        except subprocess.CalledProcessError as e:
+            print(e)
         for conn in conns:
             clean_servers(conn)
             clean_volumes(conn)
@@ -90,6 +96,11 @@ def setup(args):
             delete_volume_type(admin_conn, pname)
             delete_project(admin_conn, pname)
             delete_security_group(admin_conn, sec_group)
+        # Do it twice to make sure
+        try:
+            subprocess.check_call(shlex.split("killall sshpass"))
+        except subprocess.CalledProcessError as e:
+            print(e)
         dprint("Done!")
 
 
@@ -135,7 +146,8 @@ def create_project(conn, name):
     conn.identity.update_role(role)
     # Add conn role
     subprocess.check_call(shlex.split(
-        "openstack role add --user admin --project {} {}".format(name, name)))
+        "openstack role add --user admin --project {} {}".format(
+            name, name)))
     # Add admin role
     subprocess.check_call(shlex.split(
         "openstack role add --user admin --project {} admin".format(
@@ -152,13 +164,13 @@ def delete_project(conn, name):
             "openstack role remove --user admin --project {} {}".format(
                 name, name)))
     except subprocess.CalledProcessError as e:
-        print(e)
+        vprint(e)
     try:
         subprocess.check_call(shlex.split(
             "openstack role remove --user admin --project {} admin".format(
                 name)))
     except subprocess.CalledProcessError as e:
-        print(e)
+        vprint(e)
     role = conn.identity.find_role(name)
     if role:
         conn.identity.delete_role(role, ignore_missing=False)
@@ -280,6 +292,7 @@ def exec_cmd(server, cmd, quiet=False, reraise=False):
             "-o UserKnownHostsFile=/dev/null "
             "-o StrictHostKeyChecking=no "
             "-o CheckHostIP=no "
+            "-o LogLevel=quiet "
             "cirros@{} \"{}\"".format("-q" if quiet else "", ip, cmd))
         vprint(ncmd)
         result = subprocess.check_output(shlex.split(ncmd))
@@ -422,7 +435,13 @@ def main(args):
                     print(project.name, ":", serverd.id)
 
         def run_traffic(arg_str):
-            serverd = next(conns[0][0].compute.servers())
+            project = arg_str.strip()
+            try:
+                conn = [conn for (conn, pname) in conns if pname == project][0]
+            except IndexError:
+                print("Not a valid project name: ", project)
+                return
+            serverd = next(conn.compute.servers())
             pid = serverd.project_id
             volume = serverd.attached_volumes[0]
             dprint("Running Traffic", c="-")
@@ -437,11 +456,15 @@ def main(args):
             def _traffic_helper():
                 global stop
                 stop = False
+                # Write same 5 files over and over
+                index = 0
                 while not stop:
                     exec_cmd(serverd,
-                             "sudo dd if=/dev/urandom of=/mnt/mydrive/test.img"
+                             "sudo rm test{}.img >/dev/null 2>&1; "
+                             "sudo dd if=/dev/zero of=/mnt/mydrive/test{}.img"
                              " bs=1M count=1000 >/dev/null 2>&1 && sudo sync"
-                             "", quiet=verbose)
+                             "".format(index % 5, index % 5), quiet=verbose)
+                    index += 1
                 dprint("Traffic thread stopped", c="-")
 
             thread = threading.Thread(target=_traffic_helper)
@@ -455,27 +478,73 @@ def main(args):
             stop = True
 
         def show_ai(arg_str):
-            tenant = arg_str.strip()
+            project_name = arg_str.strip()
+            project_id = None
+            tenant = None
+            try:
+                conn = [conn for (conn, pname) in conns
+                        if pname == project_name][0]
+            except IndexError:
+                print("Not a valid project name: ", project_name)
+                return
+
+            for project in conn.identity.projects():
+                if project.name == project_name:
+                    project_id = str(uuid.UUID(project.id))
+            api = getAPI(None)
+            for t in api.tenants.list():
+                if project_id in t.get('name'):
+                    tenant = t
             if not tenant:
                 tenant = "/root"
-            dprint("AppInstances under Tenant: {}".format(tenant), c="-")
-            api = getAPI(tenant)
+            dprint("AppInstances under Project: {}".format(
+                project_name), c="-")
+            api = getAPI(tenant.get('name'))
             for ai in api.app_instances.list():
                 print(ai.get('name'))
 
         def get_traffic_stats(arg_str):
-            dprint("Getting Traffic Stats", c="-")
-            tenant = arg_str.strip()
-            if not tenant:
-                tenant = "/root"
-            api = getAPI(tenant)
+
+            tdict = {'iops': ['iops_write', 'IOPS:', lambda x: x],
+                     'bw': ['thpt_write', 'BW:', lambda x: x/1000000]}
             try:
+                project_name, mtype = [elem.strip() for elem
+                                       in arg_str.split()]
+            except ValueError:
+                print("Not enough arguments!")
+                return
+            project_id = None
+            tenant = None
+            try:
+                conn = [conn for (conn, pname) in conns
+                        if pname == project_name][0]
+            except IndexError:
+                print("Not a valid project name: ", project_name)
+                return
+
+            for project in conn.identity.projects():
+                if project.name == project_name:
+                    project_id = str(uuid.UUID(project.id))
+
+            api = getAPI(None)
+            for t in api.tenants.list():
+                if project_id in t.get('name'):
+                    tenant = t
+
+            dprint("Getting Traffic Stats", c="-")
+            tname = tenant.get('name')
+            if not tname:
+                tname = "/root"
+            api = getAPI(tname)
+            try:
+                print("Metrics!")
                 while True:
-                    print("Metrics!")
                     try:
-                        metric = api.metrics.io.thpt_write.latest.get(
+                        metric = getattr(api.metrics.io,
+                                         tdict[mtype][0]).latest.get(
                             )[0]['point']
-                        print("IOPS: ", metric['value'])
+                        print(tdict[mtype][1],
+                              tdict[mtype][2](metric['value']))
                     except IndexError:
                         print("No traffic object available")
                         break
@@ -493,21 +562,23 @@ def main(args):
                'sai': show_ai,
                'gts': get_traffic_stats}
         help = """
---------------------------------------------
+--------------------------------------------------------
 q --> Quit
 pp --> Print Projects
 pv --> Print Volumes
 ps --> Print Servers
-rt --> Run Traffic
-st --> Stop Traffic
-sai tenant --> Show App Instances for Tenant
-gts tenant --> Show traffic stats for Tenant
---------------------------------------------
+rt project_name --> Run Traffic On Project
+st --> Stop All Traffic
+sai project_name --> Show App Instances for Project
+gts project_name type --> Show traffic stats for Project
+                          Types: iops, bw
+--------------------------------------------------------
 """
         dprint("Ready To Go!")
         while True:
             result = input(help)
 
+            print("parsing input:", result)
             try:
                 cmd, arg_str = None, None
                 try:
