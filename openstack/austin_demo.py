@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 import threading
+import time
 import uuid
 
 import cinderclient
@@ -38,6 +39,16 @@ def clean_servers(nc):
             server.delete()
         except novaclient.exceptions.BadRequest:
             pass
+        except novaclient.exceptions.NotFound:
+            pass
+
+    timeout = 5
+    while timeout:
+        if len(nc.servers.list()) == 0:
+            return
+        else:
+            timeout -= 1
+            time.sleep(3)
 
 
 def get_clients():
@@ -46,8 +57,8 @@ def get_clients():
     password = os.environ.get('OS_PASSWORD')
     auth_url = os.environ.get('OS_AUTH_URL')
     project_name = os.environ.get('OS_PROJECT_NAME')
-    user_domain_id = os.environ.get('OS_USER_DOMAIN_ID')
-    project_domain_id = os.environ.get('OS_PROJECT_DOMAIN_ID')
+    user_domain_name = os.environ.get('OS_USER_DOMAIN_NAME')
+    project_domain_name = os.environ.get('OS_PROJECT_DOMAIN_NAME')
 
     if not all((username, password, auth_url, project_name)):
         usage()
@@ -56,8 +67,8 @@ def get_clients():
                        username=username,
                        password=password,
                        project_name=project_name,
-                       user_domain_id=user_domain_id,
-                       project_domain_id=project_domain_id)
+                       user_domain_name=user_domain_name,
+                       project_domain_name=project_domain_name)
 
     sess = session.Session(auth=auth)
 
@@ -100,6 +111,7 @@ def main(args):
 
     # Create initial volume:
     vol = create_volume(cc, args.root_size, image_ref=args.image_id)
+    vol.detach()
 
     root_vols = queue.Queue()
     data_vols = queue.Queue()
@@ -119,11 +131,13 @@ def main(args):
                          args=(nc, root_vol, data_vol, args.flavor_id,
                                args.net_id)).start()
 
-    import ipdb
-    ipdb.set_trace()
+    print("VMs: {}, Root Volume Size: {}, Data Volume Size: {}".format(
+        args.num_vms, args.root_size, args.data_size))
 
-    clean_volumes(cc)
+    raw_input("Press any key to tear down")
+
     clean_servers(nc)
+    clean_volumes(cc)
 
 if __name__ == "__main__":
 

@@ -53,8 +53,15 @@ def main(args):
             else:
                 print("Tenant", tname)
                 to_delete.append(tenant)
-    resp = raw_input("Are you sure you want to delete these? [Y/N]\n")
-    if resp.lower().strip() in ("y", "yes"):
+    yes = False
+    if args.yes:
+        yes = True
+    else:
+        resp = raw_input("Are you sure you want to delete these? [Y/N]\n")
+        if resp.lower().strip() in ("y", "yes"):
+            yes = True
+
+    if yes:
         print("Deleting")
         for t in to_delete:
             t.delete()
@@ -71,6 +78,8 @@ if __name__ == "__main__":
                         help="Clean empty tenants")
     parser.add_argument("-o", "--openstack-only", action='store_true',
                         help="Clean only openstack tenants")
+    parser.add_argument("-y", "--yes", action='store_true',
+                        help="DANGER!!! Bypass confirmation prompt")
     args = parser.parse_args()
     main(args)
     sys.exit(0)

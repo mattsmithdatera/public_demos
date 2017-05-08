@@ -54,7 +54,7 @@ def vprint(*args, **kwargs):
 def setup(args):
     admin_conn, conns = None, []
     project_names = [elem for elem in args.projects.split(",") if elem]
-    base_bandwidth = 500
+    # base_bandwidth = 500
     index = 1
     sec_group = "open"
     try:
@@ -71,10 +71,11 @@ def setup(args):
             conn = get_conn(project_name=pname)
             dprint("Creating Security Group", c="*")
             create_security_group(conn, sec_group)
-            create_volume_type(admin_conn,
-                               pname,
-                               volume_backend_name="datera",
-                               total_bandwidth_max=str(base_bandwidth * index))
+            # create_volume_type(admin_conn,
+            #                    pname,
+            #                    volume_backend_name="datera",
+            #                    total_bandwidth_max=str(
+            #                    base_bandwidth * index))
             index += 1
             conns.append(conn)
 
@@ -93,7 +94,7 @@ def setup(args):
         time.sleep(5)
 
         for pname in project_names:
-            delete_volume_type(admin_conn, pname)
+            # delete_volume_type(admin_conn, pname)
             delete_project(admin_conn, pname)
             delete_security_group(admin_conn, sec_group)
         # Do it twice to make sure
@@ -146,11 +147,13 @@ def create_project(conn, name):
     conn.identity.update_role(role)
     # Add conn role
     subprocess.check_call(shlex.split(
-        "openstack role add --user admin --project {} {}".format(
+        "sh -c 'openstack role add --user admin --project {} {}"
+        ">/dev/null 2>&1'".format(
             name, name)))
     # Add admin role
     subprocess.check_call(shlex.split(
-        "openstack role add --user admin --project {} admin".format(
+        "sh -c 'openstack role add --user admin --project {} admin "
+        ">/dev/null 2>&1'".format(
             name)))
 
 
@@ -235,6 +238,7 @@ def create_server(conn, root_vol, data_vol, flavor, net_name, security_group):
                 vprint("Server: {} now active".format(server_id))
                 break
         except AttributeError as e:
+            time.sleep(1)
             print(e)
     # Add security group
     server.add_security_group(conn.session, security_group)
