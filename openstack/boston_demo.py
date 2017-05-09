@@ -33,6 +33,7 @@ stop = False
 verbose = False
 net_name = None
 image_id = None
+netns = None
 
 
 class QuitError(Exception):
@@ -67,6 +68,7 @@ def setup(args):
                 delete_project(admin_conn, pname)
 
         for pname in project_names:
+            dprint("Setting Up Project")
             create_project(admin_conn, pname)
             conn = get_conn(project_name=pname)
             dprint("Creating Security Group", c="*")
@@ -290,6 +292,7 @@ def exec_cmd(server, cmd, quiet=False, reraise=False):
         ip = server.addresses[net_name][1]['addr']
     try:
         ncmd = (
+            "{} "
             "sshpass -p 'cubswin:)' "
             "ssh "
             "{} "
@@ -297,7 +300,11 @@ def exec_cmd(server, cmd, quiet=False, reraise=False):
             "-o StrictHostKeyChecking=no "
             "-o CheckHostIP=no "
             "-o LogLevel=quiet "
-            "cirros@{} \"{}\"".format("-q" if quiet else "", ip, cmd))
+            "cirros@{} \"{}\"".format(
+                "ip netns exec {}".format(netns) if netns else "",
+                "-q" if quiet else "",
+                ip,
+                cmd))
         vprint(ncmd)
         result = subprocess.check_output(shlex.split(ncmd))
     except subprocess.CalledProcessError as e:
@@ -343,16 +350,16 @@ def getAPI(tenant=None):
 
 def main(args):
 
-    global verbose, net_name
+    global verbose, net_name, netns
     if args.verbose:
         verbose = True
+    if args.netns:
+        netns = args.netns
     net_name = args.net_name
 
     dprint("Starting OpenStack Boston Summit Tenancy Demo")
     with setup(args) as conns:
         for conn, pname in conns:
-            dprint("Setting Up Project")
-
             dprint("Creating Root Image", c="*")
             # Create initial volume:
             vol = create_volume(conn, args.root_size,
@@ -607,6 +614,8 @@ if __name__ == "__main__":
     parser.add_argument('image_name')
     parser.add_argument('net_name')
     parser.add_argument('flavor_id')
+    parser.add_argument('-n', '--netns',
+                        help="net ns to use for ping/ssh commands")
     parser.add_argument('-c', '--clean', action='store_true',
                         help='Clean volumes and servers before running')
     parser.add_argument('-p', '--projects', default="silver,gold",
