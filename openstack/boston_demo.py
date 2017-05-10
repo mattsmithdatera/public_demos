@@ -192,7 +192,7 @@ def create_volume(conn, size, vol_ref=None, vols=None, image_name=None,
     vol_id = conn.block_store.create_volume(size=size,
                                             imageRef=imid,
                                             source_volid=vol_ref,
-                                            volume_type=None).id
+                                            volume_type='datera').id
     vprint("Created Volume: {}".format(vol_id))
     while True:
         vol = conn.block_store.get_volume(vol_id)
