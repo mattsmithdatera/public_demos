@@ -45,7 +45,8 @@ def main(args):
         tname = "/root/{}".format(tenant['name'])
         if "root" in tenant['name']:
             tname = "/{}".format(tenant['name'])
-        if not api.app_instances.list(tenant=tname) and args.clean:
+        if ((not api.app_instances.list(tenant=tname) or args.non_empty) and
+                args.clean):
             if args.openstack_only:
                 if tenant['name'].startswith("OS-"):
                     print("Openstack Tenant: ", tname)
@@ -64,6 +65,10 @@ def main(args):
     if yes:
         print("Deleting")
         for t in to_delete:
+            tname = "/root/{}".format(t['name'])
+            for ai in api.app_instances.list(tenant=tname):
+                ai.set(admin_state="offline", tenant=tname, force=True)
+                ai.delete(tenant=tname)
             t.delete()
         sys.exit(0)
     else:
@@ -80,6 +85,8 @@ if __name__ == "__main__":
                         help="Clean only openstack tenants")
     parser.add_argument("-y", "--yes", action='store_true',
                         help="DANGER!!! Bypass confirmation prompt")
+    parser.add_argument("-n", "--non-empty", action='store_true',
+                        help="Clean non-empty tenants as well")
     args = parser.parse_args()
     main(args)
     sys.exit(0)
