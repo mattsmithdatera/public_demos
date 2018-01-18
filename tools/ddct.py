@@ -87,12 +87,11 @@ import common
 from common import SUCCESS, FAILURE
 from validators import client_check, connection_check
 
-CONFIG = {"ip": "1.1.1.1",
+CONFIG = {"mgmt_ip": "1.1.1.1",
+          "vip1_ip": "10.0.1.1",
+          "vip2_ip": "10.0.2.1",
           "username": "admin",
           "password": "password",
-          "cinder-backup": {
-              "version": "master",
-              "location": None},
           "cinder-volume": {
               "version": "master",
               "location": None}}
