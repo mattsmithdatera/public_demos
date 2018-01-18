@@ -4,11 +4,15 @@ from __future__ import (print_function, unicode_literals, division,
                         absolute_import)
 
 import argparse
+import io
 import os
 import shutil
 import subprocess
 import sys
 import uuid
+
+import common
+from common import vprint, exe, exe_check
 
 REQUIREMENTS = ('git', 'curl')
 GITHUB = "http://github.com/Datera/cinder-driver"
@@ -30,30 +34,16 @@ volume_backend_name = datera
 datera_debug = True
 """
 
-verbose = False
 SUCCESS = 0
 FAILURE = 1
-
-
-def vprint(*args, **kwargs):
-    global verbose
-    if verbose:
-        print(*args, **kwargs)
 
 
 def check_requirements():
     vprint("Checking Requirements")
     for binary in REQUIREMENTS:
-        try:
-            subprocess.check_call(['which', binary])
-        except subprocess.CalledProcessError:
+        if not exe_check("which {}".format(binary), err=False):
             print("Missing requirement:", binary)
             print("Please install and retry script")
-
-
-def exe(cmd):
-    vprint("Running cmd:", cmd)
-    return subprocess.check_output(cmd, shell=True)
 
 
 def detect_cinder_install():
@@ -79,6 +69,13 @@ def detect_cinder_install():
 
 
 def detect_service_restart_cmd(service, display=False):
+
+    def is_journalctl():
+        try:
+            exe("journalctl --unit {} | grep 'No entries'")
+            return False
+        except subprocess.CalledProcessError:
+            return True
 
     def screen_name(service):
         first = service[0]
@@ -122,7 +119,7 @@ def clone_driver(cinder_driver, d_version):
     return repo, loc
 
 
-def check_volume_driver(cinder_driver, ip, username, password, d_version):
+def install_volume_driver(cinder_driver, ip, username, password, d_version):
     # Copy files to install location
     repo, loc = clone_driver(cinder_driver, d_version)
     dloc = os.path.join(loc, "volume/drivers")
@@ -130,8 +127,9 @@ def check_volume_driver(cinder_driver, ip, username, password, d_version):
 
     # Modify etc file
     data = None
-    with open(ETC, 'r') as f:
+    with io.open(ETC, 'r') as f:
         data = f.readlines()
+    # Place lines under [DEFAULT]
     insert = 0
     for index, line in enumerate(data):
         if any((elem in line for elem in
@@ -142,6 +140,8 @@ def check_volume_driver(cinder_driver, ip, username, password, d_version):
     data.insert(insert + 1, "enabled_backends = datera")
     data.insert(insert + 1, "verbose = True")
     data.insert(insert + 1, "debug = True")
+
+    # Write [datera] section
     tdata = ETC_TEMPLATE.format(
         ip=ip,
         login=username,
@@ -149,7 +149,7 @@ def check_volume_driver(cinder_driver, ip, username, password, d_version):
     data.extend(tdata.splitlines())
 
     shutil.copyfile(ETC, ETC + ".bak.{}".format(str(uuid.uuid4())[:4]))
-    with open(ETC, 'w') as f:
+    with io.open(ETC, 'w') as f:
         for line in data:
             line = line.strip()
             f.write(line)
@@ -165,17 +165,23 @@ def check_volume_driver(cinder_driver, ip, username, password, d_version):
     exe(restart)
 
 
-def check_backup_driver(
-        cinder_driver, ip, username, password, devstack, d_version):
-    vprint("Checking/Installing Datera Cinder Backup Driver")
-    # Copy files to install location
-    repo, loc = clone_driver(cinder_driver, d_version)
-    dloc = os.path.join(loc, "backup/drivers")
-    exe("cp {}/src/datera/backup/datera.py {}".format(repo, dloc))
+def check_volume_driver():
+    pass
 
-    # Modify etc file
+# def install_backup_driver(
+#         cinder_driver, ip, username, password, devstack, d_version):
+#     vprint("Checking/Installing Datera Cinder Backup Driver")
+#     # Copy files to install location
+#     repo, loc = clone_driver(cinder_driver, d_version)
+#     dloc = os.path.join(loc, "backup/drivers")
+#     exe("cp {}/src/datera/backup/datera.py {}".format(repo, dloc))
 
-    # Restart cinder-backup service
+#     # Modify etc file
+
+#     # Restart cinder-backup service
+
+# def check_backup_driver():
+#    pass
 
 
 def main(args):
@@ -190,12 +196,12 @@ def main(args):
                         args.password,
                         args.d_version)
 
-    if args.backup_driver:
-        check_backup_driver(args.cinder_driver,
-                            args.ip,
-                            args.username,
-                            args.password,
-                            args.d_version)
+    # if args.backup_driver:
+    #     check_backup_driver(args.cinder_driver,
+    #                         args.ip,
+    #                         args.username,
+    #                         args.password,
+    #                         args.d_version)
 
     print("Ready to go")
     return SUCCESS
@@ -212,12 +218,12 @@ if __name__ == "__main__":
                         help='Detect cinder installation and print location')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help="Print verbose output")
-    parser.add_argument('-b', '--backup-driver', action='store_true',
-                        help="Install backup driver")
+    # parser.add_argument('-b', '--backup-driver', action='store_true',
+    #                     help="Install backup driver")
     parser.add_argument('-c', '--cinder-driver',
                         help="Cinder driver folder location (for custom "
                              "install)")
 
     args = parser.parse_args()
-    verbose = args.verbose
+    common.verbose = args.verbose
     sys.exit(main(args))
