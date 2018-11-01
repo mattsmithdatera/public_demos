@@ -1,0 +1,84 @@
+===================
+Vancouver Demo Plan
+===================
+
+Top-level goals
+---------------
+1. Wow the observer
+2. Demonstrate the value of Datera's platform
+    * Demonstrate ease of use
+    * Demonstrate performance
+    * Demonstrate live QoS
+    * Demonstrate tenancy
+    * Demonstrate tenancy QoS?
+3. Show Ecosystem Integrations
+    * OpenStack
+    * Kubernetes
+    * VMWare
+4. Make demo no-touch
+5. Make cleanup and restart easy
+
+
+Pieces
+------
+
+Multiple OpenStack Versions Under Different Tenants (Mitaka, Newton, Pike?):
+    1. Tenants:
+        * Have max iops set to 1000 or something
+
+    2. Glance images
+        * Create 1 image every 5 minutes (100 GB?)
+        * Delete images to keep a rotating set and to conserve space (X TB?)
+
+    3. Migrate Volumes from Ceph to Datera
+        * Create Ceph volumes at regular intervals for migration
+        * Migrate random volume to Datera (retype with migration)
+
+    4. Cinder Volumes
+        * Boot from Glance image after creation
+        * Attach migrated Ceph-->Datera volume to VM
+        * Run data to attached volume and boot volume
+        * Retype both boot volume and attach volume to higher QoS
+        * Observe metrics change
+        * Delete server/volume after X number to conserve resources (X servers?)
+
+    5. Additional Features Enabled:
+        * CHAP
+        * LDAP?
+        * IOPS per/BW per
+
+Kubernetes Under Separate Tenant, (X pods?)
+    1. Create pod
+    2. Attach volume
+    3. Write data
+    4. Delete volume
+    5. Delete pod
+
+
+VMWare Under Separate Tenant, (X VMs?)
+    1. Create volumes
+    2. Write to volumes (I assume via VMWare VM attachment)
+    3. Delete volumes
+
+
+Architecture
+------------
+Openstack Mitaka ---- Single Node --------|---- Ceph Single Node?
+                                          |
+Openstack Newton ---- Controller Node ----|
+                      Compute Node -------|-----MGT1 ----|
+                      Compute Node -------|---- VIP1 ----|
+                                          |---- VIP2 ----|---- Datera DSP
+OpenStack Pike ------ Single Node? -------|
+                                          |
+Kubernetes ---------- Single Node --------|
+                                          |
+VMWare -------------- Single Node --------|
+
+Tenants
+-------
+Vancouver-OM
+Vancouver-ON
+Vancouver-OP
+Vancouver-KU
+Vancouver-VM
