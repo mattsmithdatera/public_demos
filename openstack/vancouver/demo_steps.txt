@@ -1,0 +1,17 @@
+- Emphasize that all of this was node using the openstacksdk and the Datera
+  Python SDK
+- Start watching projects, servers and volumes in one terminal
+- Start demo in another terminal
+- Point out dashboard while demo setup is running, emphasize how this is the
+  root dashboard that shows provisioning and traffic information for an
+  aggregate of all tenants
+- Show the watch box of instances and volumes, point out the projects being
+  created
+- Once the prompt appears point out the relationship between OpenStack project
+  and the automatically created Datera tenant
+- Show that both projects have an instance with a Datera root volume and data
+  volume
+- Show initial metrics for both projects (should be zero)
+- Start traffic on one project
+- Observe the metrics for that project (should be greater than zero)
+- Observe the metrics for the other project (should be zero)
